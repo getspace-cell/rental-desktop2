@@ -5,6 +5,7 @@
 import time
 import subprocess
 import psutil
+import pyautogui
 from typing import Optional, Dict, Any
 from api_client import APIClient
 from steam_manager import SteamManager
@@ -77,9 +78,17 @@ class GameLauncher:
         self.steam_manager.start_steam()
         time.sleep(3)
         
-        # Получаем код 2FA
+        # Шаг 1: Входим в Steam с логином и паролем (без 2FA)
+        print("Входим в Steam...")
+        self.steam_manager.login_to_steam(
+            session['email'],
+            session['password']
+        )
+        
+        # Шаг 2: После нажатия "Войти" Steam запросит код 2FA
+        # Теперь получаем код 2FA
         print("Получаем код двухфакторной авторизации...")
-        time.sleep(2)  # Даем время на отправку письма
+        time.sleep(3)  # Даем время на отправку письма после попытки входа
         
         max_retries = 10
         two_factor_code = None
@@ -100,13 +109,15 @@ class GameLauncher:
         if not two_factor_code:
             raise Exception("Не удалось получить код 2FA")
         
-        # Входим в Steam
-        print("Входим в Steam...")
-        self.steam_manager.login_to_steam(
-            session['email'],
-            session['password'],
-            two_factor_code
-        )
+        # Шаг 3: Вводим код 2FA
+        print("Вводим код 2FA...")
+        time.sleep(1)
+        pyautogui.hotkey('ctrl', 'a')  # Очищаем поле ввода
+        time.sleep(0.2)
+        pyautogui.write(two_factor_code, interval=0.1)
+        time.sleep(0.5)
+        pyautogui.press('enter')
+        time.sleep(5)  # Ждем завершения входа
         
         time.sleep(5)
         

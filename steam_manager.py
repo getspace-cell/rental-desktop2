@@ -49,7 +49,7 @@ class SteamManager:
         subprocess.Popen([self.steam_path], shell=True)
         time.sleep(5)  # Ждем запуска Steam
     
-    def login_to_steam(self, username: str, password: str, two_factor_code: str):
+    def login_to_steam(self, username: str, password: str, two_factor_code: str = None):
         """Автоматически входит в Steam"""
         # Если Steam уже залогинен, выходим
         if self.is_steam_running():
@@ -80,27 +80,38 @@ class SteamManager:
             except:
                 pass
         
-        # Вводим логин
+        # Шаг 1: Вводим логин
         time.sleep(1)
         pyautogui.write(username, interval=0.05)
         time.sleep(0.5)
+        
+        # Переходим к полю пароля (Tab)
         pyautogui.press('tab')
         time.sleep(0.5)
         
-        # Вводим пароль
+        # Шаг 2: Вводим пароль
         pyautogui.write(password, interval=0.05)
         time.sleep(0.5)
-        pyautogui.press('enter')
-        time.sleep(3)
         
-        # Вводим код 2FA если требуется
+        # Шаг 3: Нажимаем кнопку "Войти" (Enter)
+        pyautogui.press('enter')
+        time.sleep(3)  # Ждем обработки логина/пароля
+        
+        # Шаг 4: Если требуется код 2FA, вводим его
+        # Steam покажет окно запроса 2FA после проверки логина/пароля
         if two_factor_code:
-            time.sleep(2)
+            # Ждем появления окна запроса 2FA
+            time.sleep(3)
+            
             # Очищаем поле ввода (на случай если там что-то есть)
             pyautogui.hotkey('ctrl', 'a')
             time.sleep(0.2)
+            
+            # Вводим код 2FA
             pyautogui.write(two_factor_code, interval=0.1)
             time.sleep(0.5)
+            
+            # Подтверждаем ввод кода
             pyautogui.press('enter')
             time.sleep(5)  # Ждем завершения входа
     
