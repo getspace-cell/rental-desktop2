@@ -1,0 +1,315 @@
+"""
+Главное окно приложения
+"""
+import sys
+import threading
+import time
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                             QLabel, QPushButton, QListWidget, QListWidgetItem,
+                             QMessageBox, QProgressBar, QMenuBar, QAction)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtGui import QPixmap, QIcon
+from api_client import APIClient
+from game_launcher import GameLauncher
+from config import Config
+from ui.settings_dialog import SettingsDialog
+
+class GameMonitor(QObject):
+    """Класс для мониторинга игры в отдельном потоке"""
+    game_closed = pyqtSignal()
+    
+    def __init__(self, game_launcher):
+        super().__init__()
+        self.game_launcher = game_launcher
+        self.running = False
+    
+    def start_monitoring(self):
+        """Начинает мониторинг"""
+        self.running = True
+        thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        thread.start()
+    
+    def stop_monitoring(self):
+        """Останавливает мониторинг"""
+        self.running = False
+    
+    def _monitor_loop(self):
+        """Цикл мониторинга"""
+        while self.running:
+            if not self.game_launcher.monitor_game():
+                self.game_closed.emit()
+                break
+            time.sleep(2)
+
+class MainWindow(QMainWindow):
+    """Главное окно приложения"""
+    
+    def __init__(self):
+        super().__init__()
+        self.config = Config()
+        self.api_client = APIClient()
+        self.game_launcher = GameLauncher(self.api_client, self.config)
+        self.games = []
+        self.current_rental = None
+        self.monitor = None
+        
+        # Загружаем ключ
+        pc_key = self.config.load_key()
+        if pc_key:
+            self.api_client.set_key(pc_key)
+        
+        self.setup_ui()
+        self.load_games()
+        
+        # Таймер для обновления статуса
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_status)
+        self.status_timer.start(5000)  # Обновляем каждые 5 секунд
+    
+    def setup_ui(self):
+        """Настраивает интерфейс"""
+        self.setWindowTitle("Rental Games Desktop")
+        self.setGeometry(100, 100, 1000, 700)
+        
+        # Центральный виджет
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # Главный layout
+        main_layout = QVBoxLayout()
+        central_widget.setLayout(main_layout)
+        
+        # Меню
+        menubar = self.menuBar()
+        
+        settings_action = QAction("Настройки", self)
+        settings_action.triggered.connect(self.show_settings)
+        menubar.addAction(settings_action)
+        
+        # Заголовок
+        title = QLabel("Доступные игры")
+        title.setStyleSheet("font-size: 18px; font-weight: bold;")
+        main_layout.addWidget(title)
+        
+        # Список игр
+        self.games_list = QListWidget()
+        self.games_list.itemDoubleClicked.connect(self.on_game_double_clicked)
+        main_layout.addWidget(self.games_list)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        
+        self.play_button = QPushButton("Играть")
+        self.play_button.clicked.connect(self.on_play_clicked)
+        self.play_button.setEnabled(False)
+        button_layout.addWidget(self.play_button)
+        
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.clicked.connect(self.load_games)
+        button_layout.addWidget(self.refresh_button)
+        
+        main_layout.addLayout(button_layout)
+        
+        # Статус бар
+        self.status_bar = self.statusBar()
+        self.status_label = QLabel("Готов к работе")
+        self.status_bar.addWidget(self.status_label)
+        
+        # Прогресс бар для аренды
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        main_layout.addWidget(self.progress_bar)
+    
+    def load_games(self):
+        """Загружает список игр"""
+        try:
+            self.status_label.setText("Загрузка игр...")
+            self.games = self.api_client.get_games()
+            self.update_games_list()
+            self.status_label.setText(f"Загружено игр: {len(self.games)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить игры: {e}")
+            self.status_label.setText("Ошибка загрузки игр")
+    
+    def update_games_list(self):
+        """Обновляет список игр"""
+        self.games_list.clear()
+        
+        for game in self.games:
+            item_text = f"{game['title']}"
+            if game.get('availableAccounts', 0) > 0:
+                item_text += f" (Доступно: {game['availableAccounts']})"
+            else:
+                item_text += " (Недоступно)"
+            
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, game)
+            
+            # Отключаем недоступные игры
+            if game.get('availableAccounts', 0) == 0:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+            
+            self.games_list.addItem(item)
+    
+    def on_game_double_clicked(self, item: QListWidgetItem):
+        """Обработчик двойного клика по игре"""
+        game = item.data(Qt.UserRole)
+        if game and game.get('availableAccounts', 0) > 0:
+            self.launch_game(game)
+    
+    def on_play_clicked(self):
+        """Обработчик нажатия кнопки 'Играть'"""
+        current_item = self.games_list.currentItem()
+        if not current_item:
+            return
+        
+        game = current_item.data(Qt.UserRole)
+        if game:
+            self.launch_game(game)
+    
+    def launch_game(self, game: dict):
+        """Запускает игру"""
+        # Проверяем настройки
+        steam_path = self.config.get_setting('steam_path')
+        if not steam_path:
+            QMessageBox.warning(
+                self, 
+                "Настройки", 
+                "Пожалуйста, укажите путь к Steam в настройках"
+            )
+            self.show_settings()
+            return
+        
+        # Проверяем активную аренду
+        if self.current_rental:
+            reply = QMessageBox.question(
+                self,
+                "Активная аренда",
+                "У вас уже есть активная аренда. Завершить её и начать новую?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.end_current_rental()
+            else:
+                return
+        
+        # Запускаем игру
+        try:
+            self.status_label.setText(f"Запуск игры {game['title']}...")
+            self.play_button.setEnabled(False)
+            
+            # Запускаем в отдельном потоке
+            thread = threading.Thread(
+                target=self._launch_game_thread,
+                args=(game,),
+                daemon=True
+            )
+            thread.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось запустить игру: {e}")
+            self.status_label.setText("Ошибка запуска игры")
+            self.play_button.setEnabled(True)
+    
+    def _launch_game_thread(self, game: dict):
+        """Запускает игру в отдельном потоке"""
+        try:
+            success = self.game_launcher.launch_game(game, duration_hours=1)
+            
+            if success:
+                # Получаем информацию об активной аренде
+                try:
+                    rental_info = self.api_client.get_active_rental()
+                    if rental_info.get('hasActiveRental'):
+                        self.current_rental = rental_info['rental']
+                        
+                        # Запускаем мониторинг
+                        self.monitor = GameMonitor(self.game_launcher)
+                        self.monitor.game_closed.connect(self.on_game_closed)
+                        self.monitor.start_monitoring()
+                        
+                        # Обновляем UI в главном потоке
+                        self.status_label.setText(f"Игра запущена: {game['title']}")
+                        self.progress_bar.setVisible(True)
+                        self.progress_bar.setValue(0)
+                    else:
+                        self.status_label.setText("Игра запущена, но аренда не найдена")
+                except Exception as e:
+                    print(f"Ошибка при получении информации об аренде: {e}")
+                    self.status_label.setText(f"Игра запущена: {game['title']}")
+            else:
+                self.status_label.setText("Ошибка запуска игры")
+                
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            print(f"Ошибка при запуске игры: {traceback.format_exc()}")
+            self.status_label.setText(f"Ошибка: {error_msg}")
+        finally:
+            self.play_button.setEnabled(True)
+    
+    def on_game_closed(self):
+        """Обработчик закрытия игры"""
+        self.end_current_rental()
+        QMessageBox.information(self, "Игра закрыта", "Сессия аренды завершена")
+    
+    def end_current_rental(self):
+        """Завершает текущую аренду"""
+        if self.monitor:
+            self.monitor.stop_monitoring()
+            self.monitor = None
+        
+        if self.game_launcher:
+            self.game_launcher.end_session()
+        
+        self.current_rental = None
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Готов к работе")
+    
+    def update_status(self):
+        """Обновляет статус"""
+        if self.current_rental:
+            # Обновляем информацию об аренде
+            try:
+                rental_info = self.api_client.get_active_rental()
+                if rental_info.get('hasActiveRental'):
+                    rental = rental_info['rental']
+                    remaining = rental.get('remainingHours', 0)
+                    self.status_label.setText(
+                        f"Аренда активна: {rental['gameTitle']} "
+                        f"(Осталось: {remaining:.1f} ч.)"
+                    )
+                    
+                    # Обновляем прогресс бар
+                    total_hours = rental.get('plannedDurationHours', 1)
+                    if total_hours > 0:
+                        progress = int((1 - remaining / total_hours) * 100)
+                        self.progress_bar.setValue(progress)
+                else:
+                    # Аренда завершена
+                    self.end_current_rental()
+            except:
+                pass
+    
+    def show_settings(self):
+        """Показывает диалог настроек"""
+        dialog = SettingsDialog(self.config, self)
+        dialog.exec_()
+    
+    def closeEvent(self, event):
+        """Обработчик закрытия окна"""
+        if self.current_rental:
+            reply = QMessageBox.question(
+                self,
+                "Активная аренда",
+                "У вас есть активная аренда. Завершить сессию?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                self.end_current_rental()
+        
+        event.accept()
+
