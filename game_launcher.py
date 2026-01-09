@@ -28,19 +28,41 @@ class GameLauncher:
             print(f"Начинаем аренду игры {game['title']}...")
             rental_response = self.api_client.start_rental(game['id'], duration_hours)
             
+            print(f"Ответ start_rental: {rental_response}")
+            
             if not rental_response.get('success'):
                 raise Exception("Не удалось начать аренду")
             
             session = rental_response['session']
             self.current_session = session
+            print(f"Данные сессии: {session}")
             
-            # 2. Получаем информацию об активной аренде для получения platform
+            # 2. Получаем информацию об активной аренде для получения platform и rentalId
             rental_info = self.api_client.get_active_rental()
+            print(f"Информация об активной аренде: {rental_info}")
+            
             platform = 'steam'  # По умолчанию
+            rental_id = None
             if rental_info.get('hasActiveRental') and rental_info.get('rental'):
+                rental = rental_info['rental']
+                # Пробуем разные варианты названий полей для ID аренды
+                rental_id = rental.get('id') or rental.get('rentalId') or rental.get('rental_id')
+                print(f"Найден rentalId: {rental_id}")
                 # Platform может быть в данных аккаунта, но обычно это steam для большинства игр
                 # Определяем платформу по наличию steam_url в игре
                 platform = 'steam'  # Пока поддерживаем только Steam
+            
+            # Сохраняем rentalId в текущую сессию
+            if rental_id:
+                self.current_session['rentalId'] = rental_id
+            
+            # Также пробуем найти rentalId в самом ответе start_rental
+            if not rental_id and rental_response.get('rental'):
+                rental_from_response = rental_response.get('rental')
+                rental_id = rental_from_response.get('id') or rental_from_response.get('rentalId') or rental_from_response.get('rental_id')
+                if rental_id:
+                    self.current_session['rentalId'] = rental_id
+                    print(f"Найден rentalId в ответе start_rental: {rental_id}")
             
             # 3. Определяем платформу и запускаем соответствующий лаунчер
             platform = platform.lower()
@@ -86,28 +108,70 @@ class GameLauncher:
         )
         
         # Шаг 2: После нажатия "Войти" Steam запросит код 2FA
+        # Ждем, пока Steam обработает логин/пароль и отправит письмо с кодом
+        print("Ожидание запроса кода 2FA от Steam...")
+        time.sleep(5)  # Даем больше времени на отправку письма после попытки входа
+        
         # Теперь получаем код 2FA
         print("Получаем код двухфакторной авторизации...")
-        time.sleep(3)  # Даем время на отправку письма после попытки входа
         
-        max_retries = 10
+        max_retries = 15  # Увеличиваем количество попыток
         two_factor_code = None
+        last_error = None
         
         for attempt in range(max_retries):
             try:
-                response = self.api_client.get_2fa_code(self.current_session['id'])
-                if response.get('success') and response.get('code'):
-                    two_factor_code = response['code']
-                    print(f"Получен код 2FA: {two_factor_code}")
-                    break
+                # Пробуем использовать rentalId, если он доступен, иначе используем sessionId
+                rental_id = self.current_session.get('rentalId')
+                session_id = self.current_session.get('id')
+                
+                print(f"Запрос 2FA (попытка {attempt + 1}): rentalId={rental_id}, sessionId={session_id}")
+                
+                response = self.api_client.get_2fa_code(
+                    session_id=session_id if not rental_id else None,
+                    rental_id=rental_id
+                )
+                
+                # Проверяем ответ
+                if response.get('success'):
+                    code = response.get('code')
+                    if code:
+                        two_factor_code = code
+                        print(f"Получен код 2FA: {two_factor_code}")
+                        break
+                    else:
+                        message = response.get('message', 'Код не найден')
+                        print(f"Попытка {attempt + 1}: {message}")
+                        last_error = message
+                else:
+                    message = response.get('message', 'Неизвестная ошибка')
+                    print(f"Попытка {attempt + 1}: {message}")
+                    last_error = message
+                    
             except Exception as e:
-                print(f"Попытка {attempt + 1}: {e}")
+                error_msg = str(e)
+                print(f"Попытка {attempt + 1}: {error_msg}")
+                last_error = error_msg
+                
+                # Если это не ошибка "код не найден", продолжаем попытки
+                if "500" in error_msg or "Server Error" in error_msg:
+                    # Серверная ошибка - возможно, письмо еще не пришло
+                    pass
+                elif "404" in error_msg or "403" in error_msg or "401" in error_msg:
+                    # Критическая ошибка - прекращаем попытки
+                    raise
             
+            # Увеличиваем интервал между попытками
             if attempt < max_retries - 1:
-                time.sleep(3)
+                wait_time = 3 + (attempt * 0.5)  # Постепенно увеличиваем время ожидания
+                print(f"Ожидание {wait_time:.1f} секунд перед следующей попыткой...")
+                time.sleep(wait_time)
         
         if not two_factor_code:
-            raise Exception("Не удалось получить код 2FA")
+            error_message = f"Не удалось получить код 2FA после {max_retries} попыток"
+            if last_error:
+                error_message += f". Последняя ошибка: {last_error}"
+            raise Exception(error_message)
         
         # Шаг 3: Вводим код 2FA
         print("Вводим код 2FA...")

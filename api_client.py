@@ -29,6 +29,29 @@ class APIClient:
             
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            # Пытаемся получить детали ошибки из ответа
+            error_details = None
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    error_details = error_data
+                    if isinstance(error_data, dict):
+                        error_msg = error_data.get('message') or error_data.get('error') or str(e)
+                        print(f"Ошибка API ({e.response.status_code}): {error_msg}")
+                        print(f"Полный ответ сервера: {error_data}")
+                        raise Exception(f"{e.response.status_code} Server Error: {error_msg}")
+                except (ValueError, AttributeError):
+                    # Если не JSON, выводим текст ответа
+                    error_text = e.response.text[:1000] if hasattr(e.response, 'text') else str(e)
+                    print(f"Ошибка API ({e.response.status_code}): {error_text}")
+                    raise Exception(f"{e.response.status_code} Server Error: Server Error for url: {url}")
+            
+            print(f"Ошибка API запроса: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                print(f"Статус: {e.response.status_code}")
+                print(f"Ответ: {e.response.text[:500]}")
+            raise
         except requests.exceptions.RequestException as e:
             print(f"Ошибка API запроса: {e}")
             raise
@@ -58,8 +81,14 @@ class APIClient:
         
         return self._make_request('POST', '/club/rental/start', data=data)
     
-    def get_2fa_code(self, session_id: Optional[int] = None) -> Dict[str, Any]:
-        """Получает код двухфакторной авторизации"""
+    def get_2fa_code(self, session_id: Optional[int] = None, rental_id: Optional[int] = None, use_rental_id_only: bool = True) -> Dict[str, Any]:
+        """Получает код двухфакторной авторизации
+        
+        Args:
+            session_id: ID сессии (если не указан rental_id)
+            rental_id: ID аренды (приоритетнее чем session_id)
+            use_rental_id_only: Если True, передавать только rentalId, иначе пробовать оба варианта
+        """
         if not self.pc_key:
             raise ValueError("Ключ ПК не установлен")
         
@@ -67,8 +96,21 @@ class APIClient:
             "pcKey": self.pc_key
         }
         
-        if session_id:
+        # Попробуем разные варианты в зависимости от доступных данных
+        # Сначала пробуем rentalId (ID аренды) - это более вероятно правильный вариант
+        if rental_id is not None:
+            data["rentalId"] = rental_id
+            # Если use_rental_id_only=False и есть session_id, также передаем его
+            if not use_rental_id_only and session_id is not None:
+                data["sessionId"] = session_id
+        elif session_id is not None:
+            # Пробуем sessionId как fallback
             data["sessionId"] = session_id
+        # Если ни rentalId, ни sessionId не указаны, отправляем только pcKey
+        # Бэкенд может определить активную аренду по pcKey
+        
+        # Логируем данные запроса для отладки
+        print(f"Запрос 2FA на {self.base_url}/api/club/rental/2fa с данными: {data}")
         
         return self._make_request('POST', '/club/rental/2fa', data=data)
     
