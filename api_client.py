@@ -81,13 +81,11 @@ class APIClient:
         
         return self._make_request('POST', '/club/rental/start', data=data)
     
-    def get_2fa_code(self, session_id: Optional[int] = None, rental_id: Optional[int] = None, use_rental_id_only: bool = True) -> Dict[str, Any]:
+    def get_2fa_code(self, session_id: Optional[int] = None) -> Dict[str, Any]:
         """Получает код двухфакторной авторизации
         
         Args:
-            session_id: ID сессии (если не указан rental_id)
-            rental_id: ID аренды (приоритетнее чем session_id)
-            use_rental_id_only: Если True, передавать только rentalId, иначе пробовать оба варианта
+            session_id: ID сессии аренды (опционально, если не указан - бэкенд найдет активную сессию сам)
         """
         if not self.pc_key:
             raise ValueError("Ключ ПК не установлен")
@@ -96,18 +94,18 @@ class APIClient:
             "pcKey": self.pc_key
         }
         
-        # Попробуем разные варианты в зависимости от доступных данных
-        # Сначала пробуем rentalId (ID аренды) - это более вероятно правильный вариант
-        if rental_id is not None:
-            data["rentalId"] = rental_id
-            # Если use_rental_id_only=False и есть session_id, также передаем его
-            if not use_rental_id_only and session_id is not None:
-                data["sessionId"] = session_id
-        elif session_id is not None:
-            # Пробуем sessionId как fallback
-            data["sessionId"] = session_id
-        # Если ни rentalId, ни sessionId не указаны, отправляем только pcKey
-        # Бэкенд может определить активную аренду по pcKey
+        # Бэкенд ожидает sessionId (не rentalId!)
+        # Если sessionId не указан, бэкенд сам найдет активную сессию для этого ключа
+        if session_id is not None:
+            # Убеждаемся, что session_id является числом (int)
+            try:
+                session_id_int = int(session_id) if session_id else None
+                if session_id_int is not None:
+                    data["sessionId"] = session_id_int
+            except (ValueError, TypeError):
+                # Если не удалось преобразовать в число, не передаем sessionId
+                # Бэкенд сам найдет активную сессию
+                pass
         
         # Логируем данные запроса для отладки
         print(f"Запрос 2FA на {self.base_url}/api/club/rental/2fa с данными: {data}")

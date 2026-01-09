@@ -37,32 +37,15 @@ class GameLauncher:
             self.current_session = session
             print(f"Данные сессии: {session}")
             
-            # 2. Получаем информацию об активной аренде для получения platform и rentalId
+            # 2. Получаем информацию об активной аренде для получения platform
             rental_info = self.api_client.get_active_rental()
             print(f"Информация об активной аренде: {rental_info}")
             
             platform = 'steam'  # По умолчанию
-            rental_id = None
             if rental_info.get('hasActiveRental') and rental_info.get('rental'):
-                rental = rental_info['rental']
-                # Пробуем разные варианты названий полей для ID аренды
-                rental_id = rental.get('id') or rental.get('rentalId') or rental.get('rental_id')
-                print(f"Найден rentalId: {rental_id}")
                 # Platform может быть в данных аккаунта, но обычно это steam для большинства игр
                 # Определяем платформу по наличию steam_url в игре
                 platform = 'steam'  # Пока поддерживаем только Steam
-            
-            # Сохраняем rentalId в текущую сессию
-            if rental_id:
-                self.current_session['rentalId'] = rental_id
-            
-            # Также пробуем найти rentalId в самом ответе start_rental
-            if not rental_id and rental_response.get('rental'):
-                rental_from_response = rental_response.get('rental')
-                rental_id = rental_from_response.get('id') or rental_from_response.get('rentalId') or rental_from_response.get('rental_id')
-                if rental_id:
-                    self.current_session['rentalId'] = rental_id
-                    print(f"Найден rentalId в ответе start_rental: {rental_id}")
             
             # 3. Определяем платформу и запускаем соответствующий лаунчер
             platform = platform.lower()
@@ -121,16 +104,14 @@ class GameLauncher:
         
         for attempt in range(max_retries):
             try:
-                # Пробуем использовать rentalId, если он доступен, иначе используем sessionId
-                rental_id = self.current_session.get('rentalId')
+                # Бэкенд ожидает sessionId (ID сессии аренды)
+                # Если sessionId не указан, бэкенд сам найдет активную сессию по pcKey
                 session_id = self.current_session.get('id')
                 
-                print(f"Запрос 2FA (попытка {attempt + 1}): rentalId={rental_id}, sessionId={session_id}")
+                print(f"Запрос 2FA (попытка {attempt + 1}): sessionId={session_id}")
                 
-                response = self.api_client.get_2fa_code(
-                    session_id=session_id if not rental_id else None,
-                    rental_id=rental_id
-                )
+                # Передаем sessionId, если он есть (опционально - бэкенд может найти сам)
+                response = self.api_client.get_2fa_code(session_id=session_id)
                 
                 # Проверяем ответ
                 if response.get('success'):
