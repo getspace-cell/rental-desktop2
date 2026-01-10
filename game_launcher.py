@@ -29,7 +29,30 @@ class GameLauncher:
         try:
             # 1. Начинаем аренду через API
             print(f"Начинаем аренду игры {game['title']}...")
-            rental_response = self.api_client.start_rental(game['id'], duration_hours)
+            
+            try:
+                rental_response = self.api_client.start_rental(game['id'], duration_hours, auto_end_active=True)
+            except Exception as e:
+                # Проверяем, это ли ошибка об активной аренде
+                from api_client import ActiveRentalError
+                error_str = str(e).lower()
+                
+                is_active_rental = (
+                    isinstance(e, ActiveRentalError) or
+                    ("400" in str(e) and ("активная аренда" in error_str or 
+                                         "уже есть активная" in error_str or
+                                         "завершите текущую" in error_str or
+                                         "active rental" in error_str))
+                )
+                
+                if is_active_rental:
+                    print(f"Обнаружена активная аренда: {e}")
+                    print("Автоматически завершаем активную аренду и пробуем снова...")
+                    self._end_active_rental_and_retry(game, duration_hours)
+                    return True
+                else:
+                    # Другая ошибка - пробрасываем дальше
+                    raise e
             
             print(f"Ответ start_rental: {rental_response}")
             
@@ -73,6 +96,86 @@ class GameLauncher:
                 except:
                     pass
             return False
+    
+    def _end_active_rental_and_retry(self, game: Dict[str, Any], duration_hours: int):
+        """Завершает активную аренду и пытается начать новую"""
+        try:
+            # Получаем информацию об активной аренде
+            print("Получаем информацию об активной аренде...")
+            rental_info = self.api_client.get_active_rental()
+            
+            if rental_info.get('hasActiveRental') and rental_info.get('rental'):
+                active_rental = rental_info['rental']
+                session_id = active_rental.get('id')
+                
+                if session_id:
+                    print(f"Завершаем активную аренду (session_id: {session_id})...")
+                    
+                    # Завершаем активную аренду
+                    try:
+                        self.api_client.end_rental(session_id)
+                        print("Активная аренда успешно завершена")
+                    except Exception as e:
+                        print(f"Ошибка при завершении активной аренды: {e}")
+                        # Пробуем завершить без session_id
+                        try:
+                            self.api_client.end_rental()
+                            print("Активная аренда завершена (без session_id)")
+                        except Exception as e2:
+                            print(f"Не удалось завершить активную аренду: {e2}")
+                            raise Exception("Не удалось завершить активную аренду")
+                else:
+                    print("Не удалось определить session_id активной аренды")
+                    # Пробуем завершить без session_id
+                    try:
+                        self.api_client.end_rental()
+                        print("Активная аренда завершена (без session_id)")
+                    except Exception as e:
+                        print(f"Не удалось завершить активную аренду: {e}")
+                        raise Exception("Не удалось завершить активную аренду")
+            else:
+                print("Активная аренда не найдена (возможно, уже завершена)")
+            
+            # Небольшая задержка перед повторной попыткой
+            import time
+            time.sleep(1)
+            
+            # Пытаемся начать новую аренду
+            print("Повторная попытка начать аренду...")
+            rental_response = self.api_client.start_rental(game['id'], duration_hours, auto_end_active=False)
+            
+            print(f"Ответ start_rental (повторная попытка): {rental_response}")
+            
+            if not rental_response.get('success'):
+                raise Exception("Не удалось начать аренду после завершения предыдущей")
+            
+            session = rental_response['session']
+            self.current_session = session
+            print(f"Данные сессии (повторная попытка): {session}")
+            
+            # Получаем информацию об активной аренде для получения platform
+            rental_info = self.api_client.get_active_rental()
+            print(f"Информация об активной аренде: {rental_info}")
+            
+            platform = 'steam'  # По умолчанию
+            if rental_info.get('hasActiveRental') and rental_info.get('rental'):
+                platform = 'steam'  # Пока поддерживаем только Steam
+            
+            # Определяем платформу и запускаем соответствующий лаунчер
+            platform = platform.lower()
+            
+            if platform == 'steam':
+                self._launch_steam_game(session, game)
+            elif platform == 'epic':
+                self._launch_epic_game(session, game)
+            elif platform == 'riot':
+                self._launch_riot_game(session, game)
+            else:
+                raise Exception(f"Неподдерживаемая платформа: {platform}")
+            
+        except Exception as e:
+            print(f"Ошибка при завершении активной аренды и повторной попытке: {e}")
+            raise Exception(f"Не удалось завершить активную аренду и начать новую: {e}")
     
     def _launch_steam_game(self, session: Dict[str, Any], game: Dict[str, Any]):
         """Запускает игру через Steam"""

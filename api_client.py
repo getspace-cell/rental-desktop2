@@ -4,6 +4,10 @@
 import requests
 from typing import Optional, Dict, List, Any
 
+class ActiveRentalError(Exception):
+    """Исключение для случая, когда у ПК уже есть активная аренда"""
+    pass
+
 class APIClient:
     """Клиент для взаимодействия с API бэкенда"""
     
@@ -32,20 +36,29 @@ class APIClient:
         except requests.exceptions.HTTPError as e:
             # Пытаемся получить детали ошибки из ответа
             error_details = None
+            error_msg = None
+            status_code = None
+            
             if hasattr(e, 'response') and e.response is not None:
+                status_code = e.response.status_code
                 try:
                     error_data = e.response.json()
                     error_details = error_data
                     if isinstance(error_data, dict):
                         error_msg = error_data.get('message') or error_data.get('error') or str(e)
-                        print(f"Ошибка API ({e.response.status_code}): {error_msg}")
+                        print(f"Ошибка API ({status_code}): {error_msg}")
                         print(f"Полный ответ сервера: {error_data}")
-                        raise Exception(f"{e.response.status_code} Server Error: {error_msg}")
+                        # Пробрасываем исключение с полным сообщением
+                        raise Exception(f"{status_code} {error_msg}")
                 except (ValueError, AttributeError):
                     # Если не JSON, выводим текст ответа
                     error_text = e.response.text[:1000] if hasattr(e.response, 'text') else str(e)
-                    print(f"Ошибка API ({e.response.status_code}): {error_text}")
-                    raise Exception(f"{e.response.status_code} Server Error: Server Error for url: {url}")
+                    error_msg = error_text
+                    print(f"Ошибка API ({status_code}): {error_text}")
+                    raise Exception(f"{status_code} Server Error: {error_text}")
+            
+            # Если не удалось получить детали
+            raise Exception(f"{status_code or 'Unknown'} HTTP Error: {str(e)}")
             
             print(f"Ошибка API запроса: {e}")
             if hasattr(e, 'response') and e.response is not None:
@@ -68,8 +81,14 @@ class APIClient:
         """Получает информацию об игре"""
         return self._make_request('GET', f'/games/{game_id}')
     
-    def start_rental(self, game_id: int, duration_hours: int = 1) -> Dict[str, Any]:
-        """Начинает аренду игры"""
+    def start_rental(self, game_id: int, duration_hours: int = 1, auto_end_active: bool = True) -> Dict[str, Any]:
+        """Начинает аренду игры
+        
+        Args:
+            game_id: ID игры
+            duration_hours: Длительность аренды в часах
+            auto_end_active: Автоматически завершать активную аренду при ошибке (по умолчанию True)
+        """
         if not self.pc_key:
             raise ValueError("Ключ ПК не установлен")
         
@@ -79,7 +98,30 @@ class APIClient:
             "durationHours": duration_hours
         }
         
-        return self._make_request('POST', '/club/rental/start', data=data)
+        try:
+            return self._make_request('POST', '/club/rental/start', data=data)
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # Проверяем, это ли ошибка об активной аренде (400 Bad Request)
+            # Сообщение: "У этого ПК уже есть активная аренда. Завершите текущую сессию перед началом новой."
+            is_active_rental_error = (
+                ("400" in str(e) or "bad request" in error_msg) and
+                ("активная аренда" in error_msg or 
+                 "active rental" in error_msg or
+                 "уже есть активная" in error_msg or
+                 "завершите текущую" in error_msg or
+                 "already has active" in error_msg)
+            )
+            
+            if is_active_rental_error:
+                if auto_end_active:
+                    # Пробрасываем специальное исключение для обработки
+                    raise ActiveRentalError("У этого ПК уже есть активная аренда")
+                else:
+                    raise e
+            else:
+                raise e
     
     def get_2fa_code(self, session_id: Optional[int] = None) -> Dict[str, Any]:
         """Получает код двухфакторной авторизации
