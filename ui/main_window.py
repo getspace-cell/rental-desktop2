@@ -93,7 +93,10 @@ class MainWindow(QMainWindow):
             self.api_client.set_key(pc_key)
         
         self.setup_ui()
-        self.load_games()
+        
+        # Завершаем активную аренду перед загрузкой игр (асинхронно, чтобы не блокировать UI)
+        # Используем QTimer для выполнения после инициализации UI
+        QTimer.singleShot(100, self.end_active_rental_on_startup)
         
         # Таймер для обновления статуса
         self.status_timer = QTimer()
@@ -153,6 +156,68 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
+    
+    def end_active_rental_on_startup(self):
+        """Завершает активную аренду при запуске и затем загружает игры"""
+        def do_end_and_load():
+            """Выполняется в отдельном потоке"""
+            try:
+                if not self.api_client.pc_key:
+                    # Если нет ключа, сразу загружаем игры
+                    QTimer.singleShot(0, self.load_games)
+                    return
+                
+                print("Проверка активной аренды при запуске...")
+                QTimer.singleShot(0, lambda: self.status_label.setText("Проверка активной аренды..."))
+                
+                # Получаем информацию об активной аренде
+                rental_info = self.api_client.get_active_rental()
+                
+                if rental_info.get('hasActiveRental') and rental_info.get('rental'):
+                    active_rental = rental_info['rental']
+                    session_id = active_rental.get('id')
+                    game_title = active_rental.get('gameTitle', 'Неизвестная игра')
+                    
+                    print(f"Обнаружена активная аренда: {game_title} (session_id: {session_id})")
+                    QTimer.singleShot(0, lambda: self.status_label.setText(f"Завершение активной аренды: {game_title}..."))
+                    
+                    # Завершаем активную аренду
+                    try:
+                        if session_id:
+                            print(f"Завершаем аренду с session_id: {session_id}")
+                            self.api_client.end_rental(session_id)
+                        else:
+                            print("Завершаем аренду без session_id")
+                            self.api_client.end_rental()
+                        
+                        print("Активная аренда успешно завершена при запуске")
+                        QTimer.singleShot(0, lambda: self.status_label.setText("Активная аренда завершена"))
+                        
+                    except Exception as e:
+                        print(f"Ошибка при завершении активной аренды при запуске: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Продолжаем работу даже если не удалось завершить аренду
+                        QTimer.singleShot(0, lambda: self.status_label.setText(f"Не удалось завершить активную аренду"))
+                else:
+                    print("Активная аренда не найдена при запуске")
+                    QTimer.singleShot(0, lambda: self.status_label.setText("Активная аренда не найдена"))
+                
+                # Загружаем игры после завершения проверки
+                QTimer.singleShot(500, self.load_games)
+                
+            except Exception as e:
+                print(f"Ошибка при проверке активной аренды при запуске: {e}")
+                import traceback
+                traceback.print_exc()
+                # Продолжаем работу даже при ошибке
+                QTimer.singleShot(0, lambda: self.status_label.setText("Ошибка проверки аренды"))
+                # Загружаем игры даже при ошибке
+                QTimer.singleShot(500, self.load_games)
+        
+        # Запускаем в отдельном потоке, чтобы не блокировать UI
+        thread = threading.Thread(target=do_end_and_load, daemon=True)
+        thread.start()
     
     def load_games(self):
         """Загружает список игр"""
