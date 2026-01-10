@@ -7,16 +7,17 @@ import time
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QListWidget, QListWidgetItem,
                              QMessageBox, QProgressBar, QMenuBar, QAction)
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QPixmap, QIcon
 from api_client import APIClient
 from game_launcher import GameLauncher
 from config import Config
 from ui.settings_dialog import SettingsDialog
 
-class GameMonitor(QObject):
-    """Класс для мониторинга игры в отдельном потоке"""
+class GameMonitorWorker(QObject):
+    """Воркер для мониторинга игры в отдельном потоке"""
     game_closed = pyqtSignal()
+    status_updated = pyqtSignal(str)
     
     def __init__(self, game_launcher):
         super().__init__()
@@ -26,20 +27,53 @@ class GameMonitor(QObject):
     def start_monitoring(self):
         """Начинает мониторинг"""
         self.running = True
-        thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        thread.start()
     
     def stop_monitoring(self):
         """Останавливает мониторинг"""
         self.running = False
     
-    def _monitor_loop(self):
-        """Цикл мониторинга"""
+    def monitor_loop(self):
+        """Цикл мониторинга - выполняется в отдельном потоке"""
         while self.running:
             if not self.game_launcher.monitor_game():
                 self.game_closed.emit()
                 break
             time.sleep(2)
+
+class GameMonitor(QObject):
+    """Класс для управления мониторингом игры"""
+    game_closed = pyqtSignal()
+    
+    def __init__(self, game_launcher, parent=None):
+        super().__init__(parent)
+        self.game_launcher = game_launcher
+        self.thread = None
+        self.worker = None
+    
+    def start_monitoring(self):
+        """Начинает мониторинг в отдельном потоке"""
+        self.thread = QThread()
+        self.worker = GameMonitorWorker(self.game_launcher)
+        self.worker.moveToThread(self.thread)
+        
+        # Подключаем сигналы
+        self.thread.started.connect(self.worker.monitor_loop)
+        self.worker.game_closed.connect(self.game_closed)
+        self.worker.game_closed.connect(self.stop_monitoring)
+        
+        # Запускаем поток
+        self.worker.start_monitoring()
+        self.thread.start()
+    
+    def stop_monitoring(self):
+        """Останавливает мониторинг"""
+        if self.worker:
+            self.worker.stop_monitoring()
+        if self.thread:
+            self.thread.quit()
+            self.thread.wait()
+            self.thread = None
+            self.worker = None
 
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
@@ -224,30 +258,34 @@ class MainWindow(QMainWindow):
                     if rental_info.get('hasActiveRental'):
                         self.current_rental = rental_info['rental']
                         
-                        # Запускаем мониторинг
-                        self.monitor = GameMonitor(self.game_launcher)
+                        # Запускаем мониторинг в отдельном Qt потоке
+                        self.monitor = GameMonitor(self.game_launcher, self)
                         self.monitor.game_closed.connect(self.on_game_closed)
                         self.monitor.start_monitoring()
                         
-                        # Обновляем UI в главном потоке
-                        self.status_label.setText(f"Игра запущена: {game['title']}")
-                        self.progress_bar.setVisible(True)
-                        self.progress_bar.setValue(0)
+                        # Используем QTimer для безопасного обновления UI из другого потока
+                        QTimer.singleShot(0, lambda: self._update_ui_after_launch(game))
                     else:
-                        self.status_label.setText("Игра запущена, но аренда не найдена")
+                        QTimer.singleShot(0, lambda: self.status_label.setText("Игра запущена, но аренда не найдена"))
                 except Exception as e:
                     print(f"Ошибка при получении информации об аренде: {e}")
-                    self.status_label.setText(f"Игра запущена: {game['title']}")
+                    QTimer.singleShot(0, lambda: self.status_label.setText(f"Игра запущена: {game['title']}"))
             else:
-                self.status_label.setText("Ошибка запуска игры")
+                QTimer.singleShot(0, lambda: self.status_label.setText("Ошибка запуска игры"))
                 
         except Exception as e:
             import traceback
             error_msg = str(e)
             print(f"Ошибка при запуске игры: {traceback.format_exc()}")
-            self.status_label.setText(f"Ошибка: {error_msg}")
+            QTimer.singleShot(0, lambda: self.status_label.setText(f"Ошибка: {error_msg}"))
         finally:
-            self.play_button.setEnabled(True)
+            QTimer.singleShot(0, lambda: self.play_button.setEnabled(True))
+    
+    def _update_ui_after_launch(self, game: dict):
+        """Безопасно обновляет UI после запуска игры (вызывается из главного потока)"""
+        self.status_label.setText(f"Игра запущена: {game['title']}")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
     
     def on_game_closed(self):
         """Обработчик закрытия игры"""
@@ -268,7 +306,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Готов к работе")
     
     def update_status(self):
-        """Обновляет статус"""
+        """Обновляет статус - вызывается из главного потока"""
         if self.current_rental:
             # Обновляем информацию об аренде
             try:
@@ -289,8 +327,8 @@ class MainWindow(QMainWindow):
                 else:
                     # Аренда завершена
                     self.end_current_rental()
-            except:
-                pass
+            except Exception as e:
+                print(f"Ошибка при обновлении статуса: {e}")
     
     def show_settings(self):
         """Показывает диалог настроек"""

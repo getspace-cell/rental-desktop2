@@ -2,10 +2,12 @@
 Модуль для запуска игр
 Управляет процессом запуска игры через различные лаунчеры
 """
+import os
 import time
 import subprocess
 import psutil
 import pyautogui
+from pathlib import Path
 from typing import Optional, Dict, Any
 from api_client import APIClient
 from steam_manager import SteamManager
@@ -20,6 +22,7 @@ class GameLauncher:
         self.current_session: Optional[Dict[str, Any]] = None
         self.steam_manager: Optional[SteamManager] = None
         self.game_process: Optional[psutil.Process] = None
+        self.monitor_process: Optional[subprocess.Popen] = None
     
     def launch_game(self, game: Dict[str, Any], duration_hours: int = 1):
         """Запускает игру"""
@@ -232,6 +235,10 @@ class GameLauncher:
         
         if not self.game_process:
             print("Предупреждение: процесс игры не найден, но игра может быть запущена")
+        
+        # Запускаем процесс мониторинга после запуска игры
+        print("Запускаем процесс мониторинга...")
+        self._start_monitor_process()
     
     def _launch_epic_game(self, session: Dict[str, Any], game: Dict[str, Any]):
         """Запускает игру через Epic Games"""
@@ -276,12 +283,95 @@ class GameLauncher:
                 # В случае ошибки API продолжаем мониторинг
                 return True
     
+    def _start_monitor_process(self):
+        """Запускает процесс мониторинга"""
+        if not self.current_session:
+            return
+        
+        try:
+            import os
+            import sys
+            
+            # Получаем PID текущего процесса (главного)
+            main_pid = os.getpid()
+            
+            # Путь к скрипту мониторинга
+            script_dir = Path(__file__).parent
+            monitor_script = script_dir / "process_monitor.py"
+            
+            if not monitor_script.exists():
+                print(f"Предупреждение: скрипт мониторинга не найден: {monitor_script}")
+                return
+            
+            # Запускаем процесс мониторинга
+            pc_key = self.api_client.pc_key
+            if not pc_key:
+                print("Предупреждение: ключ ПК не установлен, невозможно запустить мониторинг")
+                return
+            
+            # Сначала запускаем один процесс мониторинга
+            # Он будет отслеживать главный процесс и игру
+            monitor_pid = main_pid  # Пока используем тот же PID
+            
+            args = [
+                sys.executable,
+                str(monitor_script),
+                str(main_pid),
+                str(monitor_pid),
+                str(self.current_session['id']),
+                pc_key
+            ]
+            
+            print(f"Запуск процесса мониторинга: {args}")
+            self.monitor_process = subprocess.Popen(
+                args,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+            )
+            
+            print(f"Процесс мониторинга запущен с PID: {self.monitor_process.pid}")
+            
+            # Теперь запускаем второй процесс мониторинга, который будет следить за первым
+            args2 = [
+                sys.executable,
+                str(monitor_script),
+                str(main_pid),
+                str(self.monitor_process.pid),
+                str(self.current_session['id']),
+                pc_key
+            ]
+            
+            monitor_process2 = subprocess.Popen(
+                args2,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+            )
+            
+            print(f"Второй процесс мониторинга запущен с PID: {monitor_process2.pid}")
+            
+        except Exception as e:
+            print(f"Ошибка при запуске процесса мониторинга: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def end_session(self):
         """Завершает сессию аренды"""
         if not self.current_session:
             return
         
         try:
+            # Останавливаем процесс мониторинга
+            if self.monitor_process:
+                try:
+                    print("Останавливаем процесс мониторинга...")
+                    self.monitor_process.terminate()
+                    self.monitor_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print("Принудительное завершение процесса мониторинга...")
+                    self.monitor_process.kill()
+                except Exception as e:
+                    print(f"Ошибка при остановке процесса мониторинга: {e}")
+                finally:
+                    self.monitor_process = None
+            
             # Закрываем Steam
             if self.steam_manager:
                 print("Закрываем Steam...")
@@ -297,4 +387,6 @@ class GameLauncher:
             
         except Exception as e:
             print(f"Ошибка при завершении сессии: {e}")
+            import traceback
+            traceback.print_exc()
 
